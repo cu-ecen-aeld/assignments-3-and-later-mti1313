@@ -1,4 +1,11 @@
 #include "systemcalls.h"
+#include <stdbool.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <unistd.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,9 +23,15 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
+    if (system(cmd) == -1)
+    {
+        return false;
+    } else
+    {
     return true;
+    }
 }
+
 
 /**
 * @param count -The numbers of variables passed to the function. The variables are command to execute.
@@ -58,12 +71,20 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
-
+    int wstatus;
+    if (fork() == -1)
+    {
+        return false;
+    }
+    if (execv(command[0], &command[1]) == -1)
+    {
+        return false;
+    }
+    wait(&wstatus);
     va_end(args);
 
     return true;
 }
-
 /**
 * @param outputfile - The full path to the file to write with command output.
 *   This file will be closed at completion of the function call.
@@ -92,7 +113,20 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int fd = open("redirected.txt", O_WRONLY | O_TRUNC | O_CREAT, 0644);
+    int wstatus = 0;
+    if (fork() == -1)
+    {
+        return false;
+    }
+    if (execv(command[0], &command[1]) == -1)
+    {
+        return false;
+    }
 
+    wait(&wstatus);
+
+    close(fd);
     va_end(args);
 
     return true;

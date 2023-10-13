@@ -1,15 +1,20 @@
 #!/bin/sh
 # Tester script for assignment 1 and assignment 2
 # Author: Siddhant Jajoo
-
+SCRIPT_DIR=$(dirname $(realpath $0))
 set -e
 set -u
+
+#clean any previous artifacts
+#make clean
+#compile with native compilation
+#make
 
 NUMFILES=10
 WRITESTR=AELD_IS_FUN
 WRITEDIR=/tmp/aeld-data
-#username=$(cat conf/username.txt)
-username=$(cat /etc/finder-app/conf/username.txt)
+username=$(cat ${SCRIPT_DIR}/conf/username.txt)
+some giberish
 if [ $# -lt 3 ]
 then
 	echo "Using default value ${WRITESTR} for string to write"
@@ -32,9 +37,7 @@ echo "Writing ${NUMFILES} files containing string ${WRITESTR} to ${WRITEDIR}"
 rm -rf "${WRITEDIR}"
 
 # create $WRITEDIR if not assignment1
-# assignment=`cat ../conf/assignment.txt`
-#assignment='cat ./conf/assignment.txt'
-assignment=`cat /etc/finder-app/conf/assignment.txt`
+assignment=`cat ${SCRIPT_DIR}/conf/assignment.txt`
 
 if [ $assignment != 'assignment1' ]
 then
@@ -56,13 +59,11 @@ fi
 
 for i in $( seq 1 $NUMFILES)
 do
-	#./writer.sh "$WRITEDIR/${username}$i.txt" "$WRITESTR"
-	#./writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
-	writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+	${SCRIPT_DIR}/writer "$WRITEDIR/${username}$i.txt" "$WRITESTR" #changed to use new writer
 done
 
-#OUTPUTSTRING=$(./finder.sh "$WRITEDIR" "$WRITESTR")
-OUTPUTSTRING=$(finder.sh "$WRITEDIR" "$WRITESTR")
+OUTPUTSTRING=$(${SCRIPT_DIR}/finder.sh "$WRITEDIR" "$WRITESTR")
+echo "${OUTPUTSTRING}" > /tmp/assingment-4-result.txt
 
 # remove temporary directories
 rm -rf /tmp/aeld-data
@@ -71,7 +72,6 @@ set +e
 echo ${OUTPUTSTRING} | grep "${MATCHSTR}"
 if [ $? -eq 0 ]; then
 	echo "success"
-	echo ${OUTPUTSTRING} > /tmp/assignment4-result.txt
 	exit 0
 else
 	echo "failed: expected  ${MATCHSTR} in ${OUTPUTSTRING} but instead found"

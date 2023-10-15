@@ -1,9 +1,21 @@
-CC = $(CROSS_COMPILE)gcc 
-CCFLAGS += -Wall -Werror
 
-all:
-	$(CC) $(CCFLAGS) -c -o aesdsocket.o aesdsocket.c
-	$(CC) $(LDFLAGS) aesdsocket.o -o aesdsocket
+CFILES = *.c
 
-clean:
-	rm -f *.o aesdsocket
+ifndef CROSS_COMPILE
+BINARY  = aesdsocket
+CC      = gcc
+CFLAGS  = -Wall -Werror
+else
+BINARY  = aesdsocket
+CC      = $(CC)
+CFLAGS  = -Wall -Werror
+endif
+
+all : $(BINARY)
+
+$(BINARY) : $(CFILES)
+		$(CC)  $(CFLAGS) -o $@ $^ $(LDFLAGS) 
+
+.PHONY = clean
+clean :
+		rm -rf $(BINARY) $(BINARY).o

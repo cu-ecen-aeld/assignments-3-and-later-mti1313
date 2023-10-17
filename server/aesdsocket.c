@@ -1,405 +1,177 @@
-
-
-/* _________________ INCLUDES________________________ */
-#define _GNU_SOURCE
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
-#include <signal.h>
 #include <unistd.h>
-#include <errno.h>
-#include <wait.h>
-#include <syslog.h>
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <arpa/inet.h>
-#include <netinet/in.h>
+#include <sys/socket.h>
+#include <errno.h>
+#include <syslog.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
-/* _______________ MACROS DEFINITIONS ________________________ */
-#define LISTENER_ADDRESS ((const char *)NULL)
-#define LISTENER_PORT ((const char *)"9000")
-#define MAX_CONNECTION_REQUESTS ((int)20)
-#define MAX_OPENED_FD ((int)20)
-#define RETURN_OK ((int)0)
-#define RETURN_NOT_OK ((int)-1)
-#define RECEIVED_DATA_FILE_LOCATION ((const char *)"/var/tmp/aesdsocketdata")
+#define BACKLOG 10
+#define MAXDATASIZE 50000
+#define MAXFILESIZE 50000
 
-/* _______________ VARS DECs/DEFS ________________________ */
+//#define DEBUG
 
-int err;                              // SAVE errno VAR
-struct addrinfo hints, *res, *p;      // SERVER ADDRESSES GENERATOR
-struct sockaddr_storage clientaddr;   // RETURN OF ACCEPTED CLIENT ADDRESS
-int allfd_count;                      // STORE THE COUNT OF ANY OPENED FD
-int allfd[MAX_OPENED_FD];             // STORE ANY OPENED FD
-char buffer_client_addresss[50];      // RETURN HUMAN RIDEABLE ADDRESS.
-int lisnerfd = -1, fdwriterfile = -1; // THE FD OF LISTENER & FD OF FILE TRACKING FOR ALL RECEIVED DATA.
-char *sendbuffer = NULL;              // READ BACK THE FILE OF RECEIVED DATA IN THIS FILE.
-ssize_t sendbuffer_size;              // @sendbuffer ELEMENT SIZE FOR REALLOCATING
-char *sendbufptr;                     // KEEPING TRACKING OF LAST READ ELEMENT IN @sendbuffer
+FILE *output_file = NULL;
+//char output_file_location[] = "aesdsocketdata.txt";
+char output_file_location[] = "/tmp/var/aesdsocketdata";
+char pathname[]="/tmp/var/";
+int s = -1;
+int new_fd = -1;
+struct addrinfo *servinfo = NULL;  // will point to the results
 
-/*______________ FUNCTION DECs ___________________ */
-
-/**
- * @brief loop in all opened fd and close it.
- *
- */
-static void closs_all_fd(void);
-
-/**
- * @brief Identify the binary IP address if it v4 Or v6
- *
- * @param a Structure Pointer describing a generic socket address
- * @return void* Return a POINTER TO sockaddr_in6 OR sockaddr_in
- */
-static void *getaddinetntop(struct sockaddr *a);
-
-/**
- * @brief Send the receive to specific fd client
- *
- * @param fds fd client
- * @param buf the buffer containing the received data send back to client.
- * @param len the lens of buffer and the remaining lens of
- * @return @param RETURN_NOT_OK if it fails
- *         @param RETURN_OK if it OK.
- */
-static int sendall(int fds, char *buf, int *len);
-/**
- * @brief signals initializing set the signals handlers
- *
- * @return @param RETURN_NOT_OK if it fails
- *         @param RETURN_OK if it OK.
- *
- */
-int signal_initializing(void);
-
-/**
- * @brief initializing the server .. bind and get ready to listen to requests.
- *
- * @return @param RETURN_NOT_OK if it fails
- *         @param RETURN_OK if it OK.
- */
-static int listener_socket_initializing(void);
-
-/**
- * @brief accept request, receive the data, write to a file @param RECEIVED_DATA_FILE_LOCATION
- *        the read the file and send it back to the client.
- *
- * @return int
- */
-static int super_loop_accept_receive_write_sendback(void);
-
-/**
- * @brief Gracefully exits when SIGINT or
- *        SIGTERM is received , Closing all FDs ,
- *        Deallocating Memory, Terminating
- *        andy waiting zombies.
- *
- * @param signo SIGNAL
- *
- *  */
-
-void sigint_handler(int signoo)
+// get sockaddr, IPv4 or IPv6:
+void *get_in_addr(struct sockaddr *sa)
 {
-    if ((signoo == SIGTERM) || (signoo == SIGINT))
-    {
-        write(STDOUT_FILENO, (void *)"Caught signal, exiting!\n", 24);
-        closs_all_fd();
-        syslog(LOG_MAKEPRI(LOG_USER, LOG_INFO), "Caught signal, exiting!");
-        closelog();
-        free(sendbuffer);
-        system("rm -rf /var/tmp/aesdsocketdata");
-        fflush(stdout);
-        exit(RETURN_OK);
+    if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in*)sa)->sin_addr);
     }
-    if (signoo == SIGCHLD)
-    {
-        while (waitpid(-1, NULL, WNOHANG) > 0); // Caught SIGCHLD, KILL ZOMBIES!
-    }
+
+    return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-int main(int argc, char *argv[])
+static void signal_handler (int signo)
 {
-    if (signal_initializing() == RETURN_NOT_OK)
+    if ((signo == SIGINT) || (signo == SIGTERM))
     {
-        fprintf(stderr, "signel_initializing FUNCTION ERROR\n");
-        return RETURN_NOT_OK;
+        syslog(LOG_INFO | LOG_DEBUG, "Caught signal, exiting");
+        printf("Caught signal, exiting\n");
+
+        remove(output_file_location);
+        close(new_fd);
+        close(s);
+        exit (EXIT_SUCCESS);
     }
 
-    if ((argc > 2) || (argc == 2 && (strcmp(argv[1], "-d") != 0)))
-    {
-        fprintf(stderr, "ERROR ARGUMENTS ARE NOT SUPPORTED!\n");
-        return RETURN_NOT_OK;
-    }
-
-    if (listener_socket_initializing() == RETURN_NOT_OK)
-    {
-        fprintf(stderr, "listener_socket_initializing FUNCTION ERROR\n");
-        return RETURN_NOT_OK;
-    }
-
-    if ((fdwriterfile = open(RECEIVED_DATA_FILE_LOCATION, O_RDWR | O_CREAT | O_TRUNC | O_SYNC, 0664)) == -1)
-    {
-        err = errno;
-        fprintf(stderr, "open ERROR FUNCTION: %s\n", strerror(err));
-        return RETURN_NOT_OK;
-    }
-    allfd[++allfd_count] = fdwriterfile;
-
-    /* Put the program in the background, and dissociate from the controlling
-   terminal.  If NOCHDIR is zero, do `chdir ("/")'.  If NOCLOSE is zero,
-   redirects stdin, stdout, and stderr to /dev/null.  */
-
-    if (argc > 1 && !(strcmp(argv[1], "-d")))
-    {
-        if (RETURN_NOT_OK == daemon(0, 1))
-        {
-            err = errno;
-            fprintf(stderr, "daemon ERROR: %s\n", strerror(err));
-            return RETURN_NOT_OK;
-        }
-    }
-
-    if (super_loop_accept_receive_write_sendback() == RETURN_NOT_OK)
-    {
-        fprintf(stderr, "lsuper_loop_accept_recieve_write_sendback FUNCTION ERROR\n");
-        return RETURN_NOT_OK;
-    }
-
-    return RETURN_OK;
 }
 
-static void *getaddinetntop(struct sockaddr *a)
+//int main (int argc, char *argv[])
+int main (int argc, char *argv[])
 {
-    if (a->sa_family == AF_INET)
-    {
-        return &(((struct sockaddr_in *)a)->sin_addr);
-    }
-    else
-        return &(((struct sockaddr_in6 *)a)->sin6_addr);
-}
+    printf("aesdsocket: Version 0.0.1\n");
+    openlog(NULL,0,LOG_USER);
+    mkdir(pathname, S_IRWXU | S_IRWXG | S_IRWXO);
 
-static int sendall(int fds, char *buf, int *len)
-{
-    int total = 0;        // how many bytes we've sent
-    int bytesleft = *len; // how many we have left to send
-    int n;
+    int status, numbytes = 0;
+    struct addrinfo hints;
+   
+    struct sockaddr_storage their_addr;
+    socklen_t addr_size;
+    
+    char ipstr[INET6_ADDRSTRLEN];   
+    int yes=1;
 
-    while (total < *len)
-    {
-        n = send(fds, buf + total, bytesleft, 0);
-        if (n == RETURN_NOT_OK)
-        {
-            err = errno;
-            if (err == EINTR)
-                continue;
-            fprintf(stderr, "sendall ERROR FUNCTION: %s\n", strerror(err));
-            return RETURN_NOT_OK;
-        }
-        total += n;
-        bytesleft -= n;
-    }
-    *len = total; // return number actually sent here
-    if (n == RETURN_NOT_OK)
-    {
-        return RETURN_NOT_OK;
-    }
-    return RETURN_OK;
-}
 
-static void closs_all_fd(void)
-{
-    for (; allfd_count != 0; allfd_count--)
-    {
-        close(allfd[allfd_count]);
-    }
-}
-int signal_initializing(void)
-{
-    struct sigaction sact;
-    sigemptyset(&sact.sa_mask);
-    sact.sa_flags = 0;
+    memset(&hints, 0, sizeof ( hints )); // make sure the struct is empty
+    hints.ai_family = AF_UNSPEC;     // don't care IPv4 or IPv6
+    hints.ai_socktype = SOCK_STREAM; // TCP stream sockets
+    hints.ai_flags = AI_PASSIVE;     // fill in my IP for me
 
-    sact.sa_handler = &sigint_handler;
-
-    if (sigaction(SIGINT, &sact, NULL) == RETURN_NOT_OK)
-    {
-        err = errno;
-        fprintf(stderr, "signal ERROR FUNCTION: %s\n", strerror(err));
-        return RETURN_NOT_OK;
+    if ((status = getaddrinfo(NULL, "9000", &hints, &servinfo)) != 0) {
+        syslog(LOG_ERR | LOG_DEBUG, "getaddrinof failed:%s",gai_strerror(status));
+        return 1;                
     }
 
-    if (sigaction(SIGTERM, &sact, NULL) == RETURN_NOT_OK)
-    {
-        err = errno;
-        fprintf(stderr, "signal ERROR FUNCTION: %s\n", strerror(err));
-        return RETURN_NOT_OK;
-    }
-    if (sigaction(SIGCHLD, &sact, NULL) == RETURN_NOT_OK)
-    {
-        err = errno;
-        fprintf(stderr, "signal ERROR FUNCTION: %s\n", strerror(err));
-        return RETURN_NOT_OK;
-    }
-    return RETURN_OK;
-}
 
-static int listener_socket_initializing(void)
-{
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
 
-    if (getaddrinfo(LISTENER_ADDRESS, LISTENER_PORT, &hints, &res))
+    if ( (s = socket (servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) == -1)
     {
-        err = errno;
-        fprintf(stderr, "getaddrinfo ERROR FUNCTION: %s\n", strerror(err));
-        return RETURN_NOT_OK;
+        syslog(LOG_ERR | LOG_DEBUG, "get socket error: %s\n", strerror(errno));
+        return 1;
     }
 
-    for (p = res; p != NULL; p = p->ai_next)
-    {
-        if ((lisnerfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1)
-        {
 
+    if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes,sizeof(int)) == -1) {
+        syslog(LOG_ERR | LOG_DEBUG, "setsockopt() error: %s\n", strerror(errno));
+        return 1;
+    }
+
+    if (-1 == bind(s, servinfo->ai_addr, servinfo->ai_addrlen))
+    {
+       syslog(LOG_ERR | LOG_DEBUG, "bind socket error: %s\n", strerror(errno));
+       return 1;
+    }
+
+    int parent = 0;
+    int daemon_is_invoced = 0;
+    if ((argc > 1 )){
+    if (!strcmp(argv[1] , "-d"))
+    {        
+        printf("Forking \n\r");
+        daemon_is_invoced = 1;
+        parent = fork();        
+    }
+    }
+
+    if (daemon_is_invoced && parent)
+    {
+        printf("Starting daemon and exit. \n\r");
+        freeaddrinfo(servinfo);
+        close(s);
+        exit(EXIT_SUCCESS);
+    }
+       
+
+    if (-1 == listen(s, BACKLOG)){
+        syslog(LOG_ERR | LOG_DEBUG, "listen socket error: %s\n", strerror(errno));
+        return 1;
+    }
+
+    signal(SIGTERM, signal_handler);
+    signal(SIGINT, signal_handler);
+
+    freeaddrinfo(servinfo);
+
+    while(1) {  // main accept() loop
+        addr_size = sizeof (their_addr);
+        new_fd = accept(s, (struct sockaddr *)&their_addr, &addr_size);
+        if (new_fd == -1) {            
             continue;
         }
-        break;
+
+        inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), ipstr, sizeof (ipstr));
+        //printf("server: got connection from %s\n", ipstr);
+        syslog(LOG_DEBUG | LOG_INFO, "Accepted connection from: %s\n", ipstr);
+        printf ("Accepted connection from %s\n", ipstr);
+ 
+        char buf[MAXDATASIZE];
+        char file_buf[MAXFILESIZE];
+        buf[0] = '\0';
+        file_buf[0] = '\0';
+       
+        while ((numbytes = recv(new_fd, buf, MAXDATASIZE - 1, 0)) != 0)
+        {   
+            if (numbytes > 0) { 
+                buf[numbytes] = '\0';
+                //printf ("Recieved: %s", buf);
+                output_file = fopen(output_file_location, "a");
+                fprintf(output_file, "%s", buf);
+                buf[0] = '\0';
+                fclose(output_file);
+                output_file = fopen(output_file_location, "r");
+                size_t size = fread(file_buf, 1, MAXFILESIZE, output_file);
+                //printf("File contance:%s. Lenght:%lu", file_buf, size);
+                
+                fclose(output_file);                    
+                send(new_fd,file_buf, size, 0);
+                }            
+        }
+        if (numbytes == 0)
+        {
+            syslog(LOG_DEBUG | LOG_INFO, "Connection closed from: %s\n", ipstr);
+            printf("Connection closed from: %s\n", ipstr);
+
+        }
+        
+        close(new_fd);  // parent doesn't need this
     }
-
-    if (lisnerfd == -1)
-    {
-        fprintf(stderr, "socket ERROR FUNCTION: %s\n", strerror(err));
-        return RETURN_NOT_OK;
-    }
-    allfd[++allfd_count] = lisnerfd;
-
-    int yes = 1;
-
-    if (setsockopt(lisnerfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1)
-    {
-        err = errno;
-        fprintf(stderr, "setsockopt ERROR FUNCTION: %s\n", strerror(err));
-        close(lisnerfd);
-        return RETURN_NOT_OK;
-    }
-
-    if (bind(lisnerfd, res->ai_addr, res->ai_addrlen) == -1)
-    {
-        err = errno;
-        fprintf(stderr, "bind ERROR FUNCTION: %s\n", strerror(err));
-        close(lisnerfd);
-        return RETURN_NOT_OK;
-    }
-
-    if (listen(lisnerfd, MAX_CONNECTION_REQUESTS) == RETURN_NOT_OK)
-    {
-        err = errno;
-        fprintf(stderr, "listen ERROR FUNCTION: %s\n", strerror(err));
-        close(lisnerfd);
-        return RETURN_NOT_OK;
-    }
-
-    freeaddrinfo(res);
-
-    return RETURN_OK;
-}
-
-static int super_loop_accept_receive_write_sendback(void)
-{
-    int fdclient = RETURN_NOT_OK;
-    char rcvbuf[100000];
-
-    socklen_t clientaddr_len = sizeof(clientaddr);
-    ssize_t len_buffer = 0;
-    ssize_t ret = 0;
-    int numbytes = 0;
-
-    while (1)
-    {
-        if ((fdclient = accept(lisnerfd, (struct sockaddr *)&clientaddr, &clientaddr_len)) == RETURN_NOT_OK)
-        {
-            err = errno;
-            fprintf(stderr, "accept ERROR FUNCTION: %s\n", strerror(err));
-            return RETURN_NOT_OK;
-        }
-        allfd[++allfd_count] = fdclient;
-
-        inet_ntop(clientaddr.ss_family, getaddinetntop((struct sockaddr *)&clientaddr), buffer_client_addresss, 50);
-        syslog(LOG_MAKEPRI(LOG_USER, LOG_INFO), "Accepted connection from %s\n", buffer_client_addresss);
-        memset(buffer_client_addresss, 0, 50);
-
-        if ((numbytes = recv(fdclient, rcvbuf, 100000, 0)) == -1)
-        {
-            err = errno;
-            fprintf(stderr, "recv ERROR FUNCTION: %s\n", strerror(err));
-            return RETURN_NOT_OK;
-            ;
-        }
-        rcvbuf[numbytes] = '\n';
-
-        char *rcvbufptr = rcvbuf;
-        len_buffer = numbytes;
-        while (len_buffer != 0 && (ret = write(fdwriterfile, rcvbufptr, len_buffer)) != 0)
-        {
-            if (ret == -1)
-            {
-                if (errno == EINTR)
-                    continue;
-                err = errno;
-                fprintf(stderr, "write ERROR FUNCTION: %s\n", strerror(err));
-                return RETURN_NOT_OK;
-                break;
-            }
-            len_buffer -= ret;
-            rcvbufptr += ret;
-        }
-
-        sendbuffer_size += numbytes;
-        sendbuffer = (char *)realloc((void *)sendbuffer, sendbuffer_size);
-        if (sendbuffer == NULL)
-        {
-            err = errno;
-            fprintf(stderr, "realloc ERROR FUNCTION: %s\n", strerror(err));
-            return RETURN_NOT_OK;
-        }
-
-        if (lseek(fdwriterfile, (off_t)0, SEEK_SET) == -1)
-        {
-            err = errno;
-            fprintf(stderr, "lseek Read ERROR FUNCTION: %s\n", strerror(err));
-            return RETURN_NOT_OK;
-        }
-
-        len_buffer = sendbuffer_size;
-        sendbufptr = sendbuffer;
-        while (len_buffer != 0 && (ret = read(fdwriterfile, sendbufptr, len_buffer)) != 0)
-        {
-            if (ret == RETURN_NOT_OK)
-            {
-                err = errno;
-                if (errno == EINTR)
-                    continue;
-                fprintf(stderr, "Read sendbuffer ERROR FUNCTION: %s\n", strerror(err));
-                return -1;
-            }
-            len_buffer -= ret;
-            sendbufptr += ret;
-        }
-
-        if (sendall(fdclient, sendbuffer, (int *)&sendbuffer_size) == -1)
-        {
-            return RETURN_NOT_OK;
-        }
-
-        if (lseek(fdwriterfile, (off_t)0, SEEK_END) == -1)
-        {
-            err = errno;
-            fprintf(stderr, "lseek Read ERROR FUNCTION: %s\n", strerror(err));
-            return RETURN_NOT_OK;
-        }
-    }
-    return RETURN_NOT_OK;
+        
+    close(s);
 }

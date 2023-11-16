@@ -14,8 +14,6 @@
 #include <string.h>
 #endif
 
-#include <stdio.h>
-
 #include "aesd-circular-buffer.h"
 
 /**
@@ -31,25 +29,33 @@
 struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct aesd_circular_buffer *buffer,
             size_t char_offset, size_t *entry_offset_byte_rtn )
 {
-    int offset = (int) char_offset;
-    for (int i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++)
-    {
-        int index = (i + buffer->out_offs) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-        int size = buffer->entry[index].size;
-        offset -= size;
-        if (offset == 0 && i != AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED - 1)
-        {
-            *entry_offset_byte_rtn = offset;
-            int next_i = (index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-            return &(buffer->entry[next_i]);
-        }
-        else if (offset < 0)
-        {            
-            offset += size;
-            *entry_offset_byte_rtn = offset;
-            return &(buffer->entry[index]);
-        }
+    size_t curr_char_offs = 0;
+    int element_idx = buffer->out_offs;
+
+    if (buffer->out_offs == buffer->in_offs && buffer->full == false) {
+        // The circular buffer is empty, so there's no data to return.
+        return NULL;
     }
+
+    do {
+        int curr_ele_size = buffer->entry[element_idx].size;
+
+        // check if current element will contain that offset?
+        if(curr_char_offs + curr_ele_size > char_offset) {
+            // element is found!
+            *entry_offset_byte_rtn = char_offset - curr_char_offs;
+                
+            return &(buffer->entry[element_idx]);   	    
+        }
+        else {
+            curr_char_offs += buffer->entry[element_idx].size; 
+        }    
+
+        // jump to next element of the buffer
+        element_idx = (element_idx + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+
+    } while(element_idx != buffer->in_offs);
+
     return NULL;
 }
 
@@ -60,22 +66,28 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
 */
-void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
+const char* aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
-    int index = buffer->in_offs;
-    memcpy(&(buffer->entry[index]), add_entry, sizeof(struct aesd_buffer_entry));
-    buffer->in_offs = (index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-    if(buffer->full)
-    {
-        buffer->out_offs = buffer->in_offs;
+    const char *ptr = NULL;
+    
+    ptr = buffer->entry[buffer->in_offs].buffptr;
+
+    // Adding the new entry irrespective of the state of the buffer (as overwrite is allowed)
+    buffer->entry[buffer->in_offs] = *(add_entry); 
+
+    // In the case of full buffer we have to increase the out_offs as now the 2nd last element is 
+    // the last pushed element
+    if (true == buffer->full) {
+        buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
     }
-    else
-    {
-        if(buffer->in_offs == buffer->out_offs)
-        {
-            buffer->full = true;
-        }
-    }
+
+    // incrementing in_offs in all situations as the new element will be added in every invokation
+    buffer->in_offs = (buffer->in_offs + 1) % (AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED);
+
+    // updating the buffer full status after every invokation
+    buffer->full = (buffer->in_offs == buffer->out_offs) ? true : false;
+
+    return ptr;
 }
 
 /**
